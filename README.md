@@ -57,7 +57,7 @@ The compiled `MagicMiddle.dmg` will appear in the project folder.
 
 ## Preferences
 
-Click the **M** icon in the menu bar and choose **Preferences…** to open the settings panel.
+Click the **MM** icon in the menu bar and choose **Preferences…** to open the settings panel.
 
 | Setting | Description |
 |---|---|
