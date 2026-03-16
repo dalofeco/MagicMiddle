@@ -1,4 +1,6 @@
-# MagicMiddle
+# MagicMiddle 
+
+<img alt="MagicMiddle Icon" src="assets/icons/Icons-macOS-Dark-1024x1024%401x.png" width="128px"/> 
 
 A lightweight macOS menu bar utility that adds middle-click support to the Magic Mouse — no extra hardware required.
 
