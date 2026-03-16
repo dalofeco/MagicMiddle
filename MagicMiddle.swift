@@ -246,9 +246,57 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         trackpadEnabled = defaults.bool(forKey: DefaultsKey.trackpadEnabled)
     }
 
+    private func makeMenuBarIcon() -> NSImage {
+        if let image = Bundle.main.image(forResource: "mmstatus") {
+            image.isTemplate = true
+            return image
+        }
+        // Fallback: draw "MM" glyphs programmatically
+        let size = NSSize(width: 24, height: 16)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let strokeWidth: CGFloat = 1.5
+            let pad    = strokeWidth / 2 + 2.5
+            let top    = rect.maxY - pad
+            let bottom = rect.minY + pad
+            let glyphW: CGFloat = 8.5
+            let gap:    CGFloat = 2.5
+
+            NSColor.black.setStroke()
+
+            func drawM(originX x: CGFloat) {
+                let left  = x
+                let right = x + glyphW
+                let mid   = x + glyphW / 2
+                let peak  = bottom + (top - bottom) * 0.38
+
+                let path = NSBezierPath()
+                path.lineWidth     = strokeWidth
+                path.lineCapStyle  = .round
+                path.lineJoinStyle = .miter
+
+                path.move(to: NSPoint(x: left,  y: bottom))
+                path.line(to: NSPoint(x: left,  y: top))
+                path.line(to: NSPoint(x: mid,   y: peak))
+                path.line(to: NSPoint(x: right, y: top))
+                path.line(to: NSPoint(x: right, y: bottom))
+                path.stroke()
+            }
+
+            drawM(originX: pad)
+            drawM(originX: pad + glyphW + gap)
+
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     private func setupStatusBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "M"
+        if let button = statusItem.button {
+            button.image = makeMenuBarIcon()
+            button.imagePosition = .imageOnly
+        }
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Preferences…", action: #selector(openPreferences), keyEquivalent: ","))
