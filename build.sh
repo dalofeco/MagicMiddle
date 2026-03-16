@@ -29,7 +29,7 @@ mkdir -p "${APP_NAME}.app/Contents/MacOS"
 mkdir -p "${APP_NAME}.app/Contents/Resources"
 
 # 3. Copy status bar icons
-echo "🖼️  Copying status bar icons..."
+echo "🖼️ Copying status bar icons..."
 cp "${STATUS_ICONS_DIR}/mmstatus@1x.png" "${APP_NAME}.app/Contents/Resources/mmstatus.png"
 cp "${STATUS_ICONS_DIR}/mmstatus@2x.png" "${APP_NAME}.app/Contents/Resources/mmstatus@2x.png"
 
