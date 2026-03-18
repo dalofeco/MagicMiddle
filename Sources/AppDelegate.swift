@@ -175,10 +175,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }, nil)
         IOHIDManagerRegisterDeviceRemovalCallback(manager, { _, _, _, _ in
             logger.info("IOHIDManager: device removed, clearing all MT device registrations")
-            // All pointer-based IDs are stale after any reconnect cycle; clear both sets so
+            // All pointer-based IDs are stale after any reconnect cycle; clear the set so
             // reenumerateMTDevices() re-registers every device with fresh pointers.
             mtRegisteredDeviceIDs.removeAll()
-            trackpadDeviceIDs.removeAll()
         }, nil)
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
         let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))

@@ -96,7 +96,6 @@ func reenumerateMTDevices() -> Bool {
         logger.info("reenumerateMTDevices: registering device \(id) (builtIn=\(isBuiltIn))")
         mtRegisteredDeviceIDs.insert(id)
 
-        if isBuiltIn { trackpadDeviceIDs.insert(id) }
         unsafeBitCast(registerPtr, to: RegisterFn.self)(device, mtCallback)
         _ = unsafeBitCast(startPtr, to: StartFn.self)(device, 0)
     }
@@ -114,8 +113,11 @@ let mtCallback: @convention(c) (
     Int32                       // frame
 ) -> Void = { devicePtr, fingersRaw, count, _, _ in
     // Ignore events from built-in trackpad devices when trackpad support is disabled.
-    if let ptr = devicePtr, trackpadDeviceIDs.contains(Int(bitPattern: ptr)), !trackpadEnabled {
-        return
+    if !trackpadEnabled, let ptr = devicePtr {
+        typealias IsBuiltInFn = @convention(c) (UnsafeMutableRawPointer) -> Bool
+        if let fnPtr = mtIsBuiltInFnPtr, unsafeBitCast(fnPtr, to: IsBuiltInFn.self)(ptr) {
+            return
+        }
     }
 
     guard let fingersRaw, count > 0 else {
@@ -151,5 +153,4 @@ let mtDisconnectCallback: @convention(c) (AnyObject, UnsafeMutableRawPointer?, U
     let id = Int(bitPattern: Unmanaged.passUnretained(device).toOpaque())
     logger.info("MT notification: device disconnected \(id)")
     mtRegisteredDeviceIDs.removeAll()
-    trackpadDeviceIDs.removeAll()
 }

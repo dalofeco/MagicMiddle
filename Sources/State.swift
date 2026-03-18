@@ -10,7 +10,4 @@ var centerTouchActive = false  // true when exactly one finger rests in the cent
 var centerZoneLow:  Float = 0.4
 var centerZoneHigh: Float = 0.6
 
-// Opaque pointer IDs of built-in trackpad devices, used to filter them in the MT callback.
-// Written once on the main thread at startup; read from the MT callback thread.
-var trackpadDeviceIDs = Set<Int>()
-var trackpadEnabled   = false
+var trackpadEnabled = false
