@@ -1,4 +1,8 @@
 import Cocoa
+import IOKit.hid
+import os
+
+private let logger = Logger(subsystem: "com.magicmiddle", category: "devices")
 
 // MARK: - MultitouchSupport private framework types
 
@@ -47,6 +51,77 @@ var centerZoneHigh: Float = 0.6
 var trackpadDeviceIDs = Set<Int>()
 var trackpadEnabled   = false
 
+// Raw dlsym pointers for MT functions required by @convention(c) callbacks and reenumerateMTDevices().
+// Written once at startup on the main thread; safe to read from any thread thereafter.
+var mtCreateListFnPtr: UnsafeMutableRawPointer? = nil
+var mtRegisterFnPtr:   UnsafeMutableRawPointer? = nil
+var mtStartFnPtr:      UnsafeMutableRawPointer? = nil
+var mtIsBuiltInFnPtr:  UnsafeMutableRawPointer? = nil
+
+// Opaque pointer IDs of MT devices that have already had mtCallback registered.
+// Guards against double-registration when multiple notification paths fire for the same event.
+var mtRegisteredDeviceIDs = Set<Int>()
+
+// Pending debounced enumeration work item. Coalesces rapid-fire IOHIDManager callbacks
+// (e.g. one per connected HID device at startup) into a single reenumerateMTDevices() call.
+var pendingMTEnumeration: DispatchWorkItem? = nil
+
+// MARK: - MultitouchSupport type aliases (module-scope for @convention(c) callbacks)
+
+private typealias MTContactCallbackFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeRawPointer?, Int32, Double, Int32) -> Void
+private typealias MTNotifyCallbackFn  = @convention(c) (AnyObject, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
+private typealias MTAddObserverFn     = @convention(c) (MTNotifyCallbackFn, UnsafeMutableRawPointer?) -> Void
+
+// MARK: - MT device enumeration
+
+// Calls MTDeviceCreateList and registers mtCallback on any device not yet seen.
+// Safe to call multiple times; skips devices already in mtRegisteredDeviceIDs.
+// Returns true if at least one non-built-in (peripheral) device was found and registered.
+@discardableResult
+func reenumerateMTDevices() -> Bool {
+    guard let createPtr   = mtCreateListFnPtr,
+          let registerPtr = mtRegisterFnPtr,
+          let startPtr    = mtStartFnPtr else {
+        logger.warning("reenumerateMTDevices: called before MT framework was loaded, skipping")
+        return false
+    }
+
+    typealias CreateListFn = @convention(c) () -> Unmanaged<CFArray>?
+    typealias RegisterFn   = @convention(c) (AnyObject, MTContactCallbackFn) -> Void
+    typealias StartFn      = @convention(c) (AnyObject, Int32) -> Int32
+    typealias IsBuiltInFn  = @convention(c) (AnyObject) -> Bool
+
+    guard let devices = unsafeBitCast(createPtr, to: CreateListFn.self)()?.takeRetainedValue() as? [AnyObject] else {
+        logger.error("reenumerateMTDevices: MTDeviceCreateList returned nil")
+        return false
+    }
+
+    logger.debug("reenumerateMTDevices: \(devices.count) device(s) currently visible")
+
+    var foundPeripheral = false
+    for device in devices {
+        // Pointer address is stable within a single MTDeviceCreateList call, which is all we need
+        // for intra-call deduplication. The set is cleared on disconnect so stale pointers never block re-registration.
+        let id = Int(bitPattern: Unmanaged.passUnretained(device).toOpaque())
+        let isBuiltIn = mtIsBuiltInFnPtr.map { unsafeBitCast($0, to: IsBuiltInFn.self)(device) } ?? false
+
+        if !isBuiltIn { foundPeripheral = true }
+
+        if mtRegisteredDeviceIDs.contains(id) {
+            logger.debug("reenumerateMTDevices: device \(id) already registered, skipping")
+            continue
+        }
+
+        logger.info("reenumerateMTDevices: registering device \(id) (builtIn=\(isBuiltIn))")
+        mtRegisteredDeviceIDs.insert(id)
+
+        if isBuiltIn { trackpadDeviceIDs.insert(id) }
+        unsafeBitCast(registerPtr, to: RegisterFn.self)(device, mtCallback)
+        _ = unsafeBitCast(startPtr, to: StartFn.self)(device, 0)
+    }
+    return foundPeripheral
+}
+
 // MARK: - Multitouch callback
 
 // @convention(c) closure — cannot capture context; reads module-level globals directly.
@@ -80,6 +155,22 @@ private let mtCallback: @convention(c) (
     }
 
     centerTouchActive = activeCount == 1 && centerFound
+}
+
+// Called when a multitouch-capable peripheral is connected after launch.
+private let mtConnectCallback: MTNotifyCallbackFn = { device, _, _ in
+    let id = Int(bitPattern: Unmanaged.passUnretained(device).toOpaque())
+    logger.info("MT notification: device connected \(id)")
+    reenumerateMTDevices()
+}
+
+// Called when a multitouch-capable peripheral is disconnected.
+// Clears its IDs so reenumerateMTDevices() will re-register it on the next reconnect.
+private let mtDisconnectCallback: MTNotifyCallbackFn = { device, _, _ in
+    let id = Int(bitPattern: Unmanaged.passUnretained(device).toOpaque())
+    logger.info("MT notification: device disconnected \(id)")
+    mtRegisteredDeviceIDs.removeAll()
+    trackpadDeviceIDs.removeAll()
 }
 
 // MARK: - CGEventTap callback
@@ -227,8 +318,10 @@ class PreferencesWindowController: NSWindowController {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem:  NSStatusItem!
     private var prefsWindow: PreferencesWindowController?
+    private var hidManager:  IOHIDManager?   // retained to keep device-match callbacks alive
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        logger.notice("MagicMiddle starting up (version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown", privacy: .public))")
         loadPreferences()
         setupStatusBar()
         requestAccessibility()
@@ -334,32 +427,68 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let handle    = dlopen(fwPath, RTLD_NOW),
               let pCreate   = dlsym(handle, "MTDeviceCreateList"),
               let pRegister = dlsym(handle, "MTRegisterContactFrameCallback"),
-              let pStart    = dlsym(handle, "MTDeviceStart") else { return }
-
-        typealias MTDeviceRef  = AnyObject
-        typealias CreateListFn = @convention(c) () -> Unmanaged<CFArray>?
-        typealias CallbackFn   = @convention(c) (UnsafeMutableRawPointer?, UnsafeRawPointer?, Int32, Double, Int32) -> Void
-        typealias RegisterFn   = @convention(c) (AnyObject, CallbackFn) -> Void
-        typealias StartFn      = @convention(c) (AnyObject, Int32) -> Int32
-        typealias IsBuiltInFn  = @convention(c) (AnyObject) -> Bool
-
-        let createList = unsafeBitCast(pCreate,   to: CreateListFn.self)
-        let register_  = unsafeBitCast(pRegister, to: RegisterFn.self)
-        let start      = unsafeBitCast(pStart,    to: StartFn.self)
-        let isBuiltIn  = dlsym(handle, "MTDeviceIsBuiltIn")
-                            .map { unsafeBitCast($0, to: IsBuiltInFn.self) }
-
-        guard let devices = createList()?.takeRetainedValue() as? [MTDeviceRef] else { return }
-
-        for device in devices {
-            // Tag built-in trackpad devices so the MT callback can filter them.
-            if isBuiltIn?(device) == true {
-                let ptr = Unmanaged.passUnretained(device).toOpaque()
-                trackpadDeviceIDs.insert(Int(bitPattern: ptr))
-            }
-            register_(device, mtCallback)
-            _ = start(device, 0)
+              let pStart    = dlsym(handle, "MTDeviceStart") else {
+            logger.error("setupMultitouchMonitor: failed to load MultitouchSupport framework or required symbols")
+            return
         }
+
+        // Store raw pointers so reenumerateMTDevices() and @convention(c) callbacks can use them.
+        mtCreateListFnPtr = pCreate
+        mtRegisterFnPtr   = pRegister
+        mtStartFnPtr      = pStart
+        mtIsBuiltInFnPtr  = dlsym(handle, "MTDeviceIsBuiltIn")
+        logger.info("setupMultitouchMonitor: framework loaded, MTDeviceIsBuiltIn=\(mtIsBuiltInFnPtr != nil)")
+
+        // Also try the private MT notification API — fires instantly on connect/disconnect
+        // but is not available on all macOS versions or device configurations.
+        let mtNotifyConnect    = dlsym(handle, "MTDeviceNotificationAddConnectObserver")
+        let mtNotifyDisconnect = dlsym(handle, "MTDeviceNotificationAddRemoveObserver")
+        logger.info("setupMultitouchMonitor: MT notification API — connect=\(mtNotifyConnect != nil), disconnect=\(mtNotifyDisconnect != nil)")
+        if let pAddConnect = mtNotifyConnect, let pAddDisconnect = mtNotifyDisconnect {
+            let addConnect    = unsafeBitCast(pAddConnect,    to: MTAddObserverFn.self)
+            let addDisconnect = unsafeBitCast(pAddDisconnect, to: MTAddObserverFn.self)
+            addConnect(mtConnectCallback, nil)
+            addDisconnect(mtDisconnectCallback, nil)
+            logger.info("setupMultitouchMonitor: MT notification observers registered")
+        }
+
+        // Use IOHIDManager as a reliable complement: fires on every HID device connection,
+        // triggering re-enumeration so newly reconnected touch devices are never missed.
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(manager, nil)
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { _, _, _, _ in
+            // Debounce: cancel any pending work and reschedule. This coalesces the burst of
+            // per-device callbacks that IOHIDManager fires for every connected HID device at
+            // startup (and on reconnect) into a single reenumerateMTDevices() call.
+            pendingMTEnumeration?.cancel()
+            let work = DispatchWorkItem {
+                logger.info("IOHIDManager: triggering re-enumeration")
+                guard !reenumerateMTDevices() else { return }
+                // No peripheral found yet — Bluetooth devices (e.g. Magic Mouse) appear in the
+                // MT framework later than the HID layer. Retry at increasing intervals.
+                func retryIfNeeded(_ delays: [Double]) {
+                    guard let next = delays.first else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + next) {
+                        guard !reenumerateMTDevices() else { return }
+                        retryIfNeeded(Array(delays.dropFirst()))
+                    }
+                }
+                retryIfNeeded([0.5, 1.5, 3.0, 6.0])
+            }
+            pendingMTEnumeration = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+        }, nil)
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { _, _, _, _ in
+            logger.info("IOHIDManager: device removed, clearing all MT device registrations")
+            // All pointer-based IDs are stale after any reconnect cycle; clear both sets so
+            // reenumerateMTDevices() re-registers every device with fresh pointers.
+            mtRegisteredDeviceIDs.removeAll()
+            trackpadDeviceIDs.removeAll()
+        }, nil)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        logger.info("setupMultitouchMonitor: IOHIDManager open result=\(openResult)")
+        hidManager = manager
     }
 
     @objc private func openPreferences() {
