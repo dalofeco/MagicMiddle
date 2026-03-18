@@ -2,7 +2,7 @@
 
 # Configuration
 APP_NAME="MagicMiddle"
-SWIFT_SOURCE="MagicMiddle.swift"
+SWIFT_SOURCE="Sources/main.swift"
 DMG_NAME="${APP_NAME}.dmg"
 BUILD_DIR="${APP_NAME}_build"
 ICONS_DIR="assets/icons"
@@ -57,7 +57,7 @@ fi
 
 # 5. Compile the Swift Code
 echo "🔨 Compiling Swift Code..."
-swiftc "$SWIFT_SOURCE" -o "${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+swiftc Sources/*.swift -o "${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 
 if [ $? -ne 0 ]; then
     echo "❌ Compilation failed."
