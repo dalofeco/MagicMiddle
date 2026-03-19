@@ -1,5 +1,6 @@
 *.app
 *.dmg
+*.psd
 .claude
 .DS_Store
 assets/Icons.icon
